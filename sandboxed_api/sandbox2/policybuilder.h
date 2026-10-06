@@ -35,6 +35,7 @@
 #include "absl/types/source_location.h"
 #include "absl/types/span.h"
 #include "sandboxed_api/sandbox2/forkserver.pb.h"
+#include "sandboxed_api/sandbox2/landlock.h"
 #include "sandboxed_api/sandbox2/mounts.h"
 #include "sandboxed_api/sandbox2/network_proxy/filtering.h"
 #include "sandboxed_api/sandbox2/policy.h"
@@ -180,9 +181,17 @@ class PolicyBuilder final {
   //   filtering enabled
   //   (AddNetworkProxyHandlerPolicy(/*filter_unix_sockets=*/true)) or
   //   explicitly opt into host networking with Allow(UnrestrictedNetworking()).
+  // - Security postures: By default, posture is kStrictV6 which requires
+  //   Landlock ABI v6+ (Linux 6.12+) for hermetic filesystem, signal, and
+  //   abstract socket isolation. On earlier kernels (Linux 5.13+ / ABI v1-v5),
+  //   callers can explicitly declare
+  //   LandlockSecurityPosture::kCompensatedOlderKernels (relying on seccomp-bpf
+  //   filters for signal/socket containment) or kExplicitFilesystemOnly.
   // Future Landlock ABI versions will support restricting these syscalls, and
   // Sandbox2 will be updated as new kernel features become available.
-  PolicyBuilder& EnableLandlock(sandbox2::EnableLandlock);
+  PolicyBuilder& EnableLandlock(
+      sandbox2::EnableLandlock,
+      LandlockSecurityPosture posture = LandlockSecurityPosture::kStrictV6);
 
   // Allows the use of memory mappings that are marked as executable.
   //
@@ -1123,6 +1132,8 @@ class PolicyBuilder final {
   bool use_namespaces_ = true;
   bool requires_namespaces_ = false;
   bool use_landlock_ = false;
+  LandlockSecurityPosture landlock_posture_ =
+      LandlockSecurityPosture::kStrictV6;
   NetNsMode netns_mode_ = NETNS_MODE_UNSPECIFIED;
   bool use_shared_ipcns_ = false;
   bool allow_map_exec_ = true;

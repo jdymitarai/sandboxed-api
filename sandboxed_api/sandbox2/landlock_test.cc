@@ -61,7 +61,19 @@ using ::testing::NotNull;
 using ::testing::SizeIs;
 
 std::string GetTestcaseBinPath(absl::string_view bin_name) {
-  return GetTestSourcePath(absl::StrCat("sandbox2/testcases/", bin_name));
+  std::string path =
+      GetTestSourcePath(absl::StrCat("sandbox2/testcases/", bin_name));
+  if (sapi::file_util::fileops::Exists(path, /*fully_resolve=*/false)) {
+    return path;
+  }
+  const char* test_srcdir = getenv("TEST_SRCDIR");
+  std::string bzlmod_path = sapi::file::JoinPath(
+      test_srcdir ? test_srcdir : ".",
+      "_main/sandboxed_api/sandbox2/testcases", bin_name);
+  if (sapi::file_util::fileops::Exists(bzlmod_path, /*fully_resolve=*/false)) {
+    return bzlmod_path;
+  }
+  return path;
 }
 
 PolicyBuilder CreateLandlockPermissiveTestPolicy(absl::string_view bin_path) {
@@ -523,6 +535,36 @@ TEST(SimpleLandlockTest, AddTmpfsFails) {
   PolicyBuilder policy_builder = CreateLandlockPermissiveTestPolicy(path);
   EXPECT_THAT(policy_builder.AddTmpfs("/tmp/foo", 1024).TryBuild(),
               StatusIs(absl::StatusCode::kFailedPrecondition));
+}
+
+TEST(LandlockPostureTest, AbiVersionProbingReturnsConsistentValue) {
+  int abi = GetLandlockAbiVersion();
+  // Landlock ABI version probing returns -1 if unsupported or disabled,
+  // or a positive version number (>= 1).
+  EXPECT_TRUE(abi >= 1 || abi == -1);
+}
+
+TEST(LandlockPostureTest, PostureSupportReflectsAbiVersion) {
+  int abi = GetLandlockAbiVersion();
+  if (abi >= 6) {
+    EXPECT_TRUE(IsLandlockSupported(LandlockSecurityPosture::kStrictV6));
+    EXPECT_TRUE(
+        IsLandlockSupported(LandlockSecurityPosture::kCompensatedOlderKernels));
+    EXPECT_TRUE(
+        IsLandlockSupported(LandlockSecurityPosture::kExplicitFilesystemOnly));
+  } else if (abi >= 1) {
+    EXPECT_FALSE(IsLandlockSupported(LandlockSecurityPosture::kStrictV6));
+    EXPECT_TRUE(
+        IsLandlockSupported(LandlockSecurityPosture::kCompensatedOlderKernels));
+    EXPECT_TRUE(
+        IsLandlockSupported(LandlockSecurityPosture::kExplicitFilesystemOnly));
+  } else {
+    EXPECT_FALSE(IsLandlockSupported(LandlockSecurityPosture::kStrictV6));
+    EXPECT_FALSE(
+        IsLandlockSupported(LandlockSecurityPosture::kCompensatedOlderKernels));
+    EXPECT_FALSE(
+        IsLandlockSupported(LandlockSecurityPosture::kExplicitFilesystemOnly));
+  }
 }
 
 }  // namespace

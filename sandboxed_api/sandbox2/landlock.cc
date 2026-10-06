@@ -79,6 +79,34 @@
 #define LANDLOCK_SCOPE_SIGNAL (1ULL << 1)
 #endif
 
+#ifndef LANDLOCK_CREATE_RULESET_VERSION
+#define LANDLOCK_CREATE_RULESET_VERSION (1ULL << 0)
+#endif
+
+constexpr uint64_t kLandlockAccessFsV1 =
+    LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE |
+    LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR |
+    LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
+    LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR |
+    LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK |
+    LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+    LANDLOCK_ACCESS_FS_MAKE_SYM;
+
+constexpr uint64_t kLandlockAccessFsV2 =
+    kLandlockAccessFsV1 | LANDLOCK_ACCESS_FS_REFER;
+
+constexpr uint64_t kLandlockAccessFsV3 =
+    kLandlockAccessFsV2 | LANDLOCK_ACCESS_FS_TRUNCATE;
+
+constexpr uint64_t kLandlockAccessFsV5 =
+    kLandlockAccessFsV3 | LANDLOCK_ACCESS_FS_IOCTL_DEV;
+
+constexpr uint64_t kLandlockAccessNetV4 =
+    LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP;
+
+constexpr uint64_t kLandlockScopeV6 =
+    LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL;
+
 struct landlock_ruleset_attr_v6 {
   uint64_t handled_access_fs;
   uint64_t handled_access_net;
@@ -131,11 +159,35 @@ bool IsWritableNode(const MountTree* tree, const std::string& path) {
   return false;
 }
 
+uint64_t GetSupportedAccessFs(int abi_version) {
+  if (abi_version >= 5) {
+    return kLandlockAccessFsV5;
+  }
+  if (abi_version >= 3) {
+    return kLandlockAccessFsV3;
+  }
+  if (abi_version >= 2) {
+    return kLandlockAccessFsV2;
+  }
+  return kLandlockAccessFsV1;
+}
+
+size_t GetRulesetAttrSize(int abi_version) {
+  if (abi_version >= 6) {
+    return sizeof(landlock_ruleset_attr_v6);
+  }
+  if (abi_version >= 4) {
+    return offsetof(landlock_ruleset_attr_v6, handled_scoped);
+  }
+  return offsetof(landlock_ruleset_attr_v6, handled_access_net);
+}
+
 void AddRulesRecursively(int ruleset_fd, const MountTree* tree,
                          const std::string& path,
                          const std::string& rw_ancestor,
                          const std::string& ro_ancestor,
-                         bool allow_write_executable) {
+                         bool allow_write_executable,
+                         uint64_t handled_fs) {
   const bool writable = IsWritableNode(tree, path);
   const bool is_dir = IsDirNode(tree);
 
@@ -152,7 +204,7 @@ void AddRulesRecursively(int ruleset_fd, const MountTree* tree,
     std::string next_path = JoinPath(path, entry.first);
     AddRulesRecursively(ruleset_fd, &entry.second, next_path,
                         farthest_rw_ancestor, farthest_ro_ancestor,
-                        allow_write_executable);
+                        allow_write_executable, handled_fs);
   }
 
   if (!tree->has_node() || tree->node().has_root_node()) {
@@ -216,6 +268,10 @@ void AddRulesRecursively(int ruleset_fd, const MountTree* tree,
     }
   }
 
+  // Mask allowed_access against handled filesystem access flags to prevent
+  // EINVAL on kernels supporting earlier Landlock ABI versions.
+  path_beneath.allowed_access &= handled_fs;
+
   SAPI_RAW_PCHECK(
       sandbox2::util::Syscall(
           __NR_landlock_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH,
@@ -224,31 +280,49 @@ void AddRulesRecursively(int ruleset_fd, const MountTree* tree,
 }
 }  // namespace
 
-void EnforceLandlock(const Mounts& mounts) {
+int GetLandlockAbiVersion() {
+  static const int kAbiVersion = []() {
+    long res = sandbox2::util::Syscall(
+        __NR_landlock_create_ruleset, 0, 0,
+        static_cast<uintptr_t>(LANDLOCK_CREATE_RULESET_VERSION));
+    return res >= 1 ? static_cast<int>(res) : -1;
+  }();
+  return kAbiVersion;
+}
+
+void EnforceLandlock(const Mounts& mounts, LandlockSecurityPosture posture) {
+  int abi_version = GetLandlockAbiVersion();
+  if (posture == LandlockSecurityPosture::kStrictV6) {
+    SAPI_RAW_CHECK(
+        abi_version >= 6,
+        "Landlock kStrictV6 posture requires Landlock ABI v6+ (Linux 6.12+).");
+  } else {
+    SAPI_RAW_CHECK(
+        abi_version >= 1,
+        "Landlock requires a kernel with Landlock enabled (Linux 5.13+).");
+  }
+
+  uint64_t handled_fs = GetSupportedAccessFs(abi_version);
+  uint64_t handled_net = (abi_version >= 4) ? kLandlockAccessNetV4 : 0;
+  uint64_t handled_scoped = (abi_version >= 6) ? kLandlockScopeV6 : 0;
+
   struct landlock_ruleset_attr_v6 ruleset_attr = {
-      .handled_access_fs =
-          LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE |
-          LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR |
-          LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
-          LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR |
-          LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK |
-          LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
-          LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER |
-          LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV,
-      .handled_access_net =
-          LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP,
-      .handled_scoped =
-          LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL,
+      .handled_access_fs = handled_fs,
+      .handled_access_net = handled_net,
+      .handled_scoped = handled_scoped,
   };
+
+  size_t attr_size = GetRulesetAttrSize(abi_version);
 
   FDCloser ruleset_fd(sandbox2::util::Syscall(
       __NR_landlock_create_ruleset, reinterpret_cast<uintptr_t>(&ruleset_attr),
-      sizeof(ruleset_attr), 0));
-  SAPI_RAW_PCHECK(ruleset_fd.get() >= 0, "landlock_create_ruleset v6 failed");
+      attr_size, 0));
+  SAPI_RAW_PCHECK(ruleset_fd.get() >= 0, "landlock_create_ruleset failed");
 
   auto mount_tree = mounts.GetMountTree();
   AddRulesRecursively(ruleset_fd.get(), &mount_tree, "/", "", "",
-                      mounts.GetMountSpecs().allow_write_executable());
+                      mounts.GetMountSpecs().allow_write_executable(),
+                      handled_fs);
 
   SAPI_RAW_PCHECK(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0,
                   "prctl PR_SET_NO_NEW_PRIVS failed");
@@ -257,16 +331,26 @@ void EnforceLandlock(const Mounts& mounts) {
                   "landlock_restrict_self failed");
 }
 
-bool IsLandlockSupported() {
-  // Queries kernel Landlock ABI version at runtime.
-  // Returns <= 0 on failure (e.g., ENOSYS if not compiled into kernel,
-  // EOPNOTSUPP if disabled via lsm= boot parameter).
-  int abi_version = syscall(__NR_landlock_create_ruleset, nullptr, 0, 1);
-  if (abi_version >= 1 && abi_version < 6) {
-    SAPI_RAW_VLOG(1, "Landlock ABI v%d detected, but ABI v6 is required.",
-                  abi_version);
+bool IsLandlockSupported(LandlockSecurityPosture posture) {
+  int abi_version = GetLandlockAbiVersion();
+  if (abi_version < 1) {
+    return false;
   }
-  return abi_version >= 6;
+  switch (posture) {
+    case LandlockSecurityPosture::kStrictV6:
+      if (abi_version < 6) {
+        SAPI_RAW_VLOG(
+            1,
+            "Landlock ABI v%d detected, but ABI v6 is required for kStrictV6.",
+            abi_version);
+        return false;
+      }
+      return true;
+    case LandlockSecurityPosture::kCompensatedOlderKernels:
+    case LandlockSecurityPosture::kExplicitFilesystemOnly:
+      return abi_version >= 1;
+  }
+  return false;
 }
 
 }  // namespace sandbox2

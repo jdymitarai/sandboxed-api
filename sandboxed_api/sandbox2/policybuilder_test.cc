@@ -397,6 +397,29 @@ TEST(PolicyBuilderTest,
                        HasSubstr("UNIX socket filtering enabled")));
 }
 
+TEST(PolicyBuilderTest, EnableLandlockWithExplicitPostureSucceeds) {
+  PolicyBuilder builder_strict;
+  builder_strict
+      .EnableLandlock(sandbox2::EnableLandlock(),
+                      LandlockSecurityPosture::kStrictV6)
+      .AddNetworkProxyHandlerPolicy(/*filter_unix_sockets=*/true);
+  EXPECT_THAT(builder_strict.TryBuild(), IsOk());
+
+  PolicyBuilder builder_comp;
+  builder_comp
+      .EnableLandlock(sandbox2::EnableLandlock(),
+                      LandlockSecurityPosture::kCompensatedOlderKernels)
+      .AddNetworkProxyHandlerPolicy(/*filter_unix_sockets=*/true);
+  EXPECT_THAT(builder_comp.TryBuild(), IsOk());
+
+  PolicyBuilder builder_fs;
+  builder_fs
+      .EnableLandlock(sandbox2::EnableLandlock(),
+                      LandlockSecurityPosture::kExplicitFilesystemOnly)
+      .AddNetworkProxyHandlerPolicy(/*filter_unix_sockets=*/true);
+  EXPECT_THAT(builder_fs.TryBuild(), IsOk());
+}
+
 TEST(PolicyBuilderTest, ConflictingTmpFsMount) {
   PolicyBuilder builder;
   builder.AddDirectory("/tmp").AddTmpfs("/tmp",

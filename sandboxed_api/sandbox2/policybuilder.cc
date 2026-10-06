@@ -282,8 +282,10 @@ PolicyBuilder& PolicyBuilder::DisableNamespaces(NamespacesToken) {
   return *this;
 }
 
-PolicyBuilder& PolicyBuilder::EnableLandlock(sandbox2::EnableLandlock) {
+PolicyBuilder& PolicyBuilder::EnableLandlock(
+    sandbox2::EnableLandlock, LandlockSecurityPosture posture) {
   use_landlock_ = true;
+  landlock_posture_ = posture;
   return *this;
 }
 

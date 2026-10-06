@@ -15,6 +15,7 @@
 #include "sandboxed_api/testing.h"
 
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 
 #include "absl/strings/string_view.h"
@@ -62,8 +63,18 @@ std::string GetTestSourcePath(absl::string_view name) {
   // Like in GetTestTempPath(), when using Bazel, the environment variable
   // TEST_SRCDIR is guaranteed to be set.
   const char* test_srcdir = getenv("TEST_SRCDIR");
-  return file::JoinPath(test_srcdir ? test_srcdir : ".",
-                        "com_google_sandboxed_api/sandboxed_api", name);
+  std::string base = test_srcdir ? test_srcdir : ".";
+  std::string piper_path = file::JoinPath(
+      base, "com_google_sandboxed_api/sandboxed_api", name);
+  if (std::filesystem::exists(piper_path)) {
+    return piper_path;
+  }
+  std::string bzlmod_path = file::JoinPath(
+      base, "_main/sandboxed_api", name);
+  if (std::filesystem::exists(bzlmod_path)) {
+    return bzlmod_path;
+  }
+  return piper_path;
 }
 
 }  // namespace sapi
